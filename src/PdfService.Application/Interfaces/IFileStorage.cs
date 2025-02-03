@@ -4,7 +4,7 @@ namespace PdfService.Application.Interfaces;
 
 public interface IFileStorage
 {
-    Task<string> SaveAsync(Stream steram, string fileName, CancellationToken cancellationToken = default);
+    Task<string> SaveAsync(Stream stream, string fileName, CancellationToken cancellationToken = default);
 
     Task<Stream> OpenReadAsync(string filePath);
     string GetFullPath(string relativePath);
