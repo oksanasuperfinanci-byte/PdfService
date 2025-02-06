@@ -1,10 +1,18 @@
 ﻿using Microsoft.Extensions.Options;
 using PdfService.Application.Interfaces;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace PdfService.Infrastructure.Storage;
 
+/// <summary>
+/// Реализация файлового хранилища на локальной файловой системе
+///
+/// Для production рукомендуется заменить на S3/Azure Blob реализацию, потому что
+///  - Локальные файлы не переживут пересоздание контейнера
+///  - Нельзя горизонтально масштабировать (каждый инстанс имеет свои файлы)
+///  - Нет встроенного backup/replication
+///
+/// Но для MVP и single-instace deployment это нормальное решение.
+/// </summary>
 public class LocalFileStorage : IFileStorage
 {
     private readonly FileStorageOptions _options;

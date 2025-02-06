@@ -3,10 +3,19 @@ using PdfService.Application.Models;
 using PdfSharp.Pdf;
 using PdfSharp.Pdf.IO;
 using System.Diagnostics;
-using System.Reflection.Metadata;
 
 namespace PdfService.Infrastructure.Services;
 
+/// <summary>
+/// Реализация процесса PDF операций
+///
+/// Используем паттерн Strategy внутри: каждая операция имеет свой метод обработки.
+/// Это позволяет легко добавлять новые операции без изменений общей структуры.
+///
+/// Зависимости:
+///  - PdfSharp: Merge, Split, Rotate, ExtractPages
+///  
+/// </summary>
 public class PdfProcessor : IPdfProcessor
 {
 
