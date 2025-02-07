@@ -488,3 +488,5 @@ git-past.ps1
 .git_fake_current_date
 
 NOTES.md
+notes*.md
+[Tt]emp*
