@@ -18,7 +18,7 @@ public class PdfProcessingException : Exception
     public PdfOperation Operation { get; }
     public string? FilePath { get; set; }
 
-    public PdfProcessingException(string message, PdfOperation operation\, string? filePath = null, Exception? innerException = null)
+    public PdfProcessingException(string message, PdfOperation operation, string? filePath = null, Exception? innerException = null)
         : base(message, innerException)
     {
         Operation = operation;

@@ -1,4 +1,5 @@
-﻿using PdfService.Application.Interfaces;
+﻿using Microsoft.IO;
+using PdfService.Application.Interfaces;
 using PdfService.Application.Models;
 using PdfSharp.Pdf;
 using PdfSharp.Pdf.IO;
@@ -20,6 +21,8 @@ public class PdfProcessor : IPdfProcessor
 {
 
     private readonly IFileStorage _storage;
+
+    private static readonly RecyclableMemoryStreamManager manager = new RecyclableMemoryStreamManager();
 
     private static bool _browserDownloaded;
     private static readonly SemaphoreSlim _browserDownloadLock = new(1, 1);
@@ -165,7 +168,7 @@ public class PdfProcessor : IPdfProcessor
     {
         var outputPath = $"{Guid.NewGuid():N}_{suggestedName}";
 
-        using var memoryStream = new MemoryStream();
+        using var memoryStream = manager.GetStream();
         outputDocument.Save(memoryStream);
         memoryStream.Position = 0;
 

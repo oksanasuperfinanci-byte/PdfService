@@ -63,7 +63,7 @@ public class InMemoryTaskStore : ITaskStore
 
     public Task DeleteAsync(Guid taskId, CancellationToken cancellationToken = default)
     {
-        if (_tasks.TryRemove(taskId, out var removed)
+        if (_tasks.TryRemove(taskId, out var removed))
         {
             // TODO: можно в лог записать
         }
