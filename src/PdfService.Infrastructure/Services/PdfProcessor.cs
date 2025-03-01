@@ -40,8 +40,8 @@ public class PdfProcessor : IPdfProcessor
             PdfOperation.Merge => true,
             PdfOperation.Split => true,
             PdfOperation.HtmlToPdf => false,
-            PdfOperation.Rotate => false,
-            PdfOperation.ExtractPages => false,
+            PdfOperation.Rotate => true,
+            PdfOperation.ExtractPages => true,
             PdfOperation.OfficeToPdf => IsLibreOfficeAvaliable(),
             PdfOperation.AddWatermark => false, // TODO: Реализовать через PdfStatus
             PdfOperation.Compress => false,     // TODO: Реализовать через GhostScript
@@ -60,10 +60,10 @@ public class PdfProcessor : IPdfProcessor
             {
                 PdfOperation.Merge => await MergePdfAsync(task, progress, cancellationToken),
                 PdfOperation.Split => await SplitPdfAsync(task, progress, cancellationToken),
-                /*PdfOperation.HtmlToPdf => await HtmlToPdfPdfAsync(task, progress, cancellationToken),
+                /*PdfOperation.HtmlToPdf => await HtmlToPdfPdfAsync(task, progress, cancellationToken),*/
                 PdfOperation.ExtractPages => await ExtractPagesPdfAsync(task, progress, cancellationToken),
                 PdfOperation.Rotate => await RotatePdfAsync(task, progress, cancellationToken),
-                PdfOperation.OfficeToPdf => await OfficeToPdfAsync(task, progress, cancellationToken),*/
+                /*PdfOperation.OfficeToPdf => await OfficeToPdfAsync(task, progress, cancellationToken),*/
 
                 _ => throw new PdfProcessingException(
                     $"Operation {task.Operation} is not supported",
@@ -155,6 +155,91 @@ public class PdfProcessor : IPdfProcessor
         return await SaveOutputDocumentAsync(outputDocument, "merged.pdf");
     }
 
+    private async Task<string> RotatePdfAsync(
+        PdfTask task,
+        IProgress<int>? progress,
+        CancellationToken cancellationToken
+        )
+    {
+        var inputPath = task.InputFilePaths.FirstOrDefault()
+            ?? throw new PdfProcessingException("No input file provided", PdfOperation.Rotate);
+
+        // Получаем угол поворота из опций (по умолчанию 90)
+        var angle = 90;
+        if(task.Options?.TryGetValue("angle", out var angleObj) == true)
+        {
+            angle = Convert.ToInt32(angleObj);
+        }
+
+        // Валидация угла
+        if (angle % 90 != 0)
+        {
+            throw new PdfProcessingException($"Rotation angle must be a multiple of 90, got{angle}", PdfOperation.Rotate);
+        }
+
+        await using var inputStream = await _storage.OpenReadAsync(inputPath);
+        using var document = PdfReader.Open(inputStream, PdfDocumentOpenMode.Modify);
+
+        var pageCount = document.PageCount;
+        for (int i = 0; i < pageCount; i++)
+        {
+            var page = document.Pages[i];
+            //Rotate складывает углы, поэтому нормализуем
+            page.Rotate = (page.Rotate + angle) % 360;
+
+            progress?.Report((i + 1) * 100 / pageCount);
+        }
+
+        return await SaveOutputDocumentAsync(document, "rotated.pdf");
+
+    }
+
+    private async Task<string> ExtractPagesPdfAsync(
+        PdfTask task,
+        IProgress<int>? progress,
+        CancellationToken cancellationToken
+        )
+    {
+        var inputPath = task.InputFilePaths.FirstOrDefault()
+           ?? throw new PdfProcessingException("No input file provided", PdfOperation.Rotate);
+
+        var pagesString = task.Options?.GetValueOrDefault("pages")?.ToString() ?? "1";
+        var pageNumbers = ParsePageNumers(pagesString);
+
+        await using var inputStream = await _storage.OpenReadAsync(inputPath);
+        using var inputDocument =  PdfReader.Open(inputStream, PdfDocumentOpenMode.Import);
+        using var outputDocument = new PdfDocument();
+
+        var totalPages = pageNumbers.Count;
+        var progressed = 0;
+
+        foreach (var pageNumber in pageNumbers)
+        {
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // Проверяем, что страница существует (нумерация с 1)
+                if (pageNumber < 1 || pageNumber > inputDocument.PageCount)
+                {
+                    continue;
+                }
+
+                outputDocument.AddPage(inputDocument.Pages[pageNumber - 1]);
+                progressed++;
+                progress?.Report(progressed * 100 / totalPages);
+            }
+
+            if (outputDocument.PageCount == 0)
+            {
+                throw new PdfProcessingException(
+                    "No valid pages to extract",
+                    PdfOperation.ExtractPages
+                    );
+            }
+        }
+            return await SaveOutputDocumentAsync(outputDocument, "extracted.pdf");
+    }
+
     #endregion
 
     #region Helper methods
@@ -174,5 +259,38 @@ public class PdfProcessor : IPdfProcessor
 
         return await _storage.SaveAsync(memoryStream, outputPath);
     }
+    private List<int> ParsePageNumers(string pagesString)
+    {
+        var result = new List<int>();
+        var parts = pagesString.Split(',', StringSplitOptions.RemoveEmptyEntries);
+
+        foreach (var part in parts)
+        {
+            var trimmed = part.Trim();
+
+            if (trimmed.Contains('-'))
+            {
+                // Это диапазон, например 5-10
+                var rangeParts = trimmed.Split('-');
+                if (rangeParts.Length == 2
+                    && int.TryParse(rangeParts[0], out var start)
+                    && int.TryParse(rangeParts[1], out var end))
+                {
+                    for (int i = start; i <= end; i++)
+                    {
+                        result.Add(i);
+                    }
+                }
+            }
+
+            else if (int.TryParse(trimmed, out var pageNumber))
+            {
+                result.Add(pageNumber);
+            }
+        }
+
+        return result.Distinct().OrderBy(x => x).ToList();
+    }
+
     #endregion
 }

@@ -38,7 +38,53 @@ namespace PdfService.WebApi.Controllers
                 return BadRequest(new { error = "At least 2 files are rewuired for merge" });
             }
 
-            return await CreatePdfTaskAsync(PdfOperation.Merge, files, cancellationToken);
+            return await CreatePdfTaskAsync(PdfOperation.Merge, files, null, cancellationToken);
+        }
+
+        [HttpPost("split")]
+        public async Task<ActionResult<PdfTaskResponse>> Split(IFormFile file, CancellationToken cancellationToken =default)
+        {
+            if (file == null)
+            {
+                return BadRequest(new { error = "File is required" });
+            }
+
+            return await CreatePdfTaskAsync(PdfOperation.Split, new List<IFormFile> { file }, null, cancellationToken);
+        }
+
+        [HttpPost("rotate")]
+        public async Task<ActionResult<PdfTaskResponse>> Rotate(IFormFile file, [FromQuery] int angle=90, CancellationToken cancellationToken=default)
+        {
+            if (file == null)
+            {
+                return BadRequest(new { error = "File is required" });
+            }
+            if (angle % 90 != 0)
+            {
+                return BadRequest(new { error = "Angle must be 90, 180, 0, 270" });
+            }
+
+            return await CreatePdfTaskAsync(
+                PdfOperation.Rotate,
+                new List<IFormFile> { file },
+                new Dictionary<string, object?> { ["angle"]= angle },
+                cancellationToken
+                );
+        }
+
+        [HttpPost("extract")]
+        public async Task<ActionResult<PdfTaskResponse>> ExtractPages(IFormFile file, [FromQuery] string pages = "1", CancellationToken cancellationToken = default)
+        {
+            if (file == null)
+            {
+                return BadRequest(new { error = "File is required" });
+            }
+
+            return await CreatePdfTaskAsync(
+                PdfOperation.ExtractPages,
+                new List<IFormFile> { file },
+                new Dictionary<string, object?> { ["pages"] = pages },
+                cancellationToken);
         }
 
         [HttpGet("dowload/{taskId:Guid}")]
