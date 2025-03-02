@@ -87,6 +87,40 @@ namespace PdfService.WebApi.Controllers
                 cancellationToken);
         }
 
+        [HttpPost("html-to-pdf")]
+        public async Task<ActionResult<PdfTaskResponse>> HtmlTopdf([FromBody] HtmlToPdfRequest request)
+        {
+            if (string.IsNullOrWhiteSpace(request.Html))
+            {
+                return BadRequest(new { error = "HTML content is required" });
+            }
+
+            var inputPaths = new List<string>();
+            var options = new Dictionary<string, object> { ["html"] = request.Html };
+
+            var taskRequest = new PdfTaskRequest
+            {
+                Operation = PdfOperation.HtmlToPdf,
+                InputFilePaths = inputPaths,
+                Options = options
+            };
+
+            var task = await _taskStore.AddTask(taskRequest);
+
+            return Accepted(new PdfTaskResponse
+            {
+                TaskId = task.Id,
+                Status = task.Status,
+                Operation = task.Operation,
+                ProcessPercent = task.ProgressPercent,
+                DownloadUrl = task.Status == TaskStatus.Completed
+                ? $"/api/pdf/download/{task.Id}"
+                : null,
+                CreateAt = task.CreateAt,
+                UpdateAt = task.UpdateAt
+            });
+        }
+
         [HttpGet("dowload/{taskId:Guid}")]
         public async Task<IActionResult> Download(Guid taskId)
         {
@@ -194,4 +228,9 @@ namespace PdfService.WebApi.Controllers
         }
         #endregion
     }
+}
+
+public record HtmlToPdfRequest
+{
+    public required string Html { get; init; }
 }

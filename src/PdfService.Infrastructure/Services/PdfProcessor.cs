@@ -3,6 +3,7 @@ using PdfService.Application.Interfaces;
 using PdfService.Application.Models;
 using PdfSharp.Pdf;
 using PdfSharp.Pdf.IO;
+using PuppeteerSharp.Media;
 using System.Diagnostics;
 
 namespace PdfService.Infrastructure.Services;
@@ -39,7 +40,7 @@ public class PdfProcessor : IPdfProcessor
         {
             PdfOperation.Merge => true,
             PdfOperation.Split => true,
-            PdfOperation.HtmlToPdf => false,
+            PdfOperation.HtmlToPdf => true,
             PdfOperation.Rotate => true,
             PdfOperation.ExtractPages => true,
             PdfOperation.OfficeToPdf => IsLibreOfficeAvaliable(),
@@ -60,7 +61,7 @@ public class PdfProcessor : IPdfProcessor
             {
                 PdfOperation.Merge => await MergePdfAsync(task, progress, cancellationToken),
                 PdfOperation.Split => await SplitPdfAsync(task, progress, cancellationToken),
-                /*PdfOperation.HtmlToPdf => await HtmlToPdfPdfAsync(task, progress, cancellationToken),*/
+                PdfOperation.HtmlToPdf => await HtmlToPdfPdfAsync(task, progress, cancellationToken),
                 PdfOperation.ExtractPages => await ExtractPagesPdfAsync(task, progress, cancellationToken),
                 PdfOperation.Rotate => await RotatePdfAsync(task, progress, cancellationToken),
                 /*PdfOperation.OfficeToPdf => await OfficeToPdfAsync(task, progress, cancellationToken),*/
@@ -84,6 +85,7 @@ public class PdfProcessor : IPdfProcessor
         }
     }
 
+   
     #endregion
 
     #region PDF Operations
@@ -239,14 +241,98 @@ public class PdfProcessor : IPdfProcessor
         }
             return await SaveOutputDocumentAsync(outputDocument, "extracted.pdf");
     }
+    private async Task<string> HtmlToPdfPdfAsync(PdfTask task, IProgress<int>? progress, CancellationToken cancellationToken)
+    {
+        // Получаем HTML контент
+        string htmlContent;
+        if (task.Options?.TryGetValue("html", out var htmlObj) == true)
+        {
+            htmlContent = htmlObj.ToString();
+        }
+        else if (task.InputFilePaths.Count > 0)
+        {
+            // Читаем HTML из файла
+            await using var stream = await _storage.OpenReadAsync(task.InputFilePaths[0]);
+            using var reader = new StreamReader(stream);
+            htmlContent = await reader.ReadToEndAsync(cancellationToken);
+        }
+        else
+        {
+            throw new PdfProcessingException(
+                "No HTML content provided",
+                PdfOperation.HtmlToPdf);
+        }
 
+        progress?.Report(10);
+
+        // Убеждаемся, что браузер скачан
+        await EnsureBrowserDownloadedAsync();
+        progress?.Report(30);
+
+        // Запускаем браузер
+        await using var browser = await PuppeteerSharp.Puppeteer.LaunchAsync(new PuppeteerSharp.LaunchOptions
+        {
+            Headless = true,
+            Args = new[]
+            {
+                "--no-sandbox", // нужно для Docker
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage" // Решает проблемы с памятью в контейнере
+            }
+        });
+
+        await using var page = await browser.NewPageAsync();
+        progress?.Report(50);
+
+        await page.SetContentAsync(htmlContent);
+        progress?.Report(70);
+
+        // Генерируем PDF
+        var pdfBytes = await page.PdfDataAsync(new PuppeteerSharp.PdfOptions
+        {
+            Format = PaperFormat.A4,
+            PrintBackground = true,
+            MarginOptions = new MarginOptions
+            {
+                Top = "20mm",
+                Bottom = "20mm",
+                Left = "15mm",
+                Right = "15mm"
+            }
+        });
+
+        progress?.Report(90);
+
+        // Сохраняем результат
+        var outputPath = $"{Guid.NewGuid():N}_convertd.pdf";
+        await using var outputStream = new MemoryStream(pdfBytes);
+        var savedPath = await _storage.SaveAsync(outputStream, outputPath, cancellationToken);
+
+        progress?.Report(100);
+        return savedPath;
+    }
     #endregion
 
     #region Helper methods
-    private bool IsLibreOfficeAvaliable()
+    private static bool IsLibreOfficeAvaliable()
     {
-        // тут будут запускаться отдельный процес libreOffice
-        return false;
+        try
+        {
+            var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = "libreoffice",
+                Arguments = "--version",
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            });
+            process?.WaitForExit(5000);
+            return process?.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private async Task<string> SaveOutputDocumentAsync(PdfDocument outputDocument, string suggestedName)
@@ -290,6 +376,29 @@ public class PdfProcessor : IPdfProcessor
         }
 
         return result.Distinct().OrderBy(x => x).ToList();
+    }
+    private async Task EnsureBrowserDownloadedAsync()
+    {
+        if (_browserDownloaded) 
+        {
+            return;
+        }
+
+        await _browserDownloadLock.WaitAsync();
+        try
+        {
+            if (_browserDownloaded)
+            {
+                return;
+            }
+
+            await new PuppeteerSharp.BrowserFetcher().DownloadAsync();
+            _browserDownloaded = true;
+        }
+        finally
+        {
+            _browserDownloadLock.Release();
+        }
     }
 
     #endregion

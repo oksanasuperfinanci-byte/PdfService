@@ -9,10 +9,15 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.IO.RecyclableMemoryStream" Version="3.0.1" />
     <PackageReference Include="PDFsharp" Version="6.2.4" />
+    <PackageReference Include="PuppeteerSharp" Version="21.0.1" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\PdfService.Application\PdfService.Application.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="Services\NewFolder\" />
   </ItemGroup>
 
 </Project>
