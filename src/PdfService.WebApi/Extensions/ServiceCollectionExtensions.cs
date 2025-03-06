@@ -20,7 +20,7 @@ public static class ServiceCollectionExtensions
 
         services.AddSingleton<IPdfProcessor, PdfProcessor>();
 
-        services.AddHostedService<PdfProjessingWorker>();
+        services.AddHostedService<PdfProcessingWorker>();
 
         return services;
     }

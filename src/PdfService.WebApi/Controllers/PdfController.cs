@@ -1,6 +1,7 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using PdfService.Application.Interfaces;
 using PdfService.Application.Models;
+using System.Threading;
 using TaskStatus = PdfService.Application.Models.TaskStatus;
 
 namespace PdfService.WebApi.Controllers
@@ -121,7 +122,33 @@ namespace PdfService.WebApi.Controllers
             });
         }
 
-        [HttpGet("dowload/{taskId:Guid}")]
+        [HttpPost("compress-pdf")]
+        public async Task<ActionResult<PdfTaskResponse>> CompressPdf( IFormFile file, CancellationToken cancellationToken)
+        {
+            if (file == null)
+            {
+                return BadRequest(new { error = "Compress content is required" });
+            }
+
+            var inputPaths = new List<string>();
+            var options = new Dictionary<string, object> { ["compress"] = new[] { file.Name, "/ebook" } };
+
+            var taskRequest = new PdfTaskRequest
+            {
+                Operation = PdfOperation.Compress,
+                InputFilePaths = inputPaths,
+                Options = options
+            };
+
+            return await CreatePdfTaskAsync(
+               PdfOperation.Compress,
+               new List<IFormFile> { file },
+               options,
+               cancellationToken);
+
+        }
+
+            [HttpGet("dowload/{taskId:Guid}")]
         public async Task<IActionResult> Download(Guid taskId)
         {
             var task = await _taskStore.GetAsync(taskId);

@@ -1,10 +1,12 @@
 ﻿using Microsoft.IO;
+using Microsoft.Win32;
 using PdfService.Application.Interfaces;
 using PdfService.Application.Models;
 using PdfSharp.Pdf;
 using PdfSharp.Pdf.IO;
 using PuppeteerSharp.Media;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace PdfService.Infrastructure.Services;
 
@@ -45,7 +47,7 @@ public class PdfProcessor : IPdfProcessor
             PdfOperation.ExtractPages => true,
             PdfOperation.OfficeToPdf => IsLibreOfficeAvaliable(),
             PdfOperation.AddWatermark => false, // TODO: Реализовать через PdfStatus
-            PdfOperation.Compress => false,     // TODO: Реализовать через GhostScript
+            PdfOperation.Compress => true,     // TODO: Реализовать через GhostScript
             _ => false
         };
     }
@@ -64,6 +66,7 @@ public class PdfProcessor : IPdfProcessor
                 PdfOperation.HtmlToPdf => await HtmlToPdfPdfAsync(task, progress, cancellationToken),
                 PdfOperation.ExtractPages => await ExtractPagesPdfAsync(task, progress, cancellationToken),
                 PdfOperation.Rotate => await RotatePdfAsync(task, progress, cancellationToken),
+                PdfOperation.Compress => await CompressWithGhostscriptAsync(task, progress, cancellationToken),
                 /*PdfOperation.OfficeToPdf => await OfficeToPdfAsync(task, progress, cancellationToken),*/
 
                 _ => throw new PdfProcessingException(
@@ -85,7 +88,195 @@ public class PdfProcessor : IPdfProcessor
         }
     }
 
-   
+    private async Task<string> CompressWithGhostscriptAsync(
+    PdfTask task,
+    IProgress<int>? progress,
+    CancellationToken cancellationToken)
+    {
+        // ── 1. Входные данные ────────────────────────────────────────────────────
+        var inputFileName = task.InputFilePaths?.FirstOrDefault()
+    ?? throw new PdfProcessingException("No input file provided.", PdfOperation.Compress);
+
+
+        var pdfsettings = ResolvePdfSettings(task.Options);
+
+        var inputPath = _storage.GetFullPath(inputFileName);  // ← полный физический путь для GS
+        var outputName = $"{Guid.NewGuid():N}_{Path.GetFileNameWithoutExtension(inputFileName)}_compressed.pdf";
+        var outputPath = _storage.GetFullPath(outputName);
+
+        var outputDir = Path.GetDirectoryName(outputPath)
+            ?? throw new PdfProcessingException(
+                "Cannot resolve output directory.", PdfOperation.Compress);
+
+        Directory.CreateDirectory(outputDir);
+
+        // ── 2. Ghostscript ───────────────────────────────────────────────────────
+        var gsPath = ResolveGhostscriptExecutable();
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = gsPath,
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            CreateNoWindow = true,
+            UseShellExecute = false,
+        };
+
+        // ArgumentList экранирует пути автоматически — инъекция невозможна
+        startInfo.ArgumentList.Add("-sDEVICE=pdfwrite");
+        startInfo.ArgumentList.Add("-dCompatibilityLevel=1.4");
+        startInfo.ArgumentList.Add($"-dPDFSETTINGS={pdfsettings}");
+        startInfo.ArgumentList.Add("-dNOPAUSE");
+        startInfo.ArgumentList.Add("-dQUIET");
+        startInfo.ArgumentList.Add("-dBATCH");
+        startInfo.ArgumentList.Add($"-sOutputFile={outputPath}");
+        startInfo.ArgumentList.Add(inputPath);
+
+        progress?.Report(10);
+
+        using var process = new Process { StartInfo = startInfo };
+
+        try
+        {
+            if (!process.Start())
+                throw new PdfProcessingException(
+                    "Failed to start Ghostscript process.", PdfOperation.Compress);
+
+            // Читаем потоки ДО WaitForExitAsync, иначе возможен дедлок:
+            // GS заблокируется на записи в заполненный буфер, а мы — на ожидании выхода.
+            var stdErrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+            var stdOutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+
+            await process.WaitForExitAsync(cancellationToken);
+
+            var stdErr = await stdErrTask;
+            var stdOut = await stdOutTask;
+
+            if (process.ExitCode != 0)
+            {
+                TryDeleteFile(outputPath);
+                throw new PdfProcessingException(
+                    $"Ghostscript exited with code {process.ExitCode}. " +
+                    $"Stderr: {stdErr} Stdout: {stdOut}",
+                    PdfOperation.Compress);
+            }
+
+            progress?.Report(100);
+            return outputPath;
+        }
+        catch (OperationCanceledException)
+        {
+            if (!process.HasExited)
+                process.Kill(entireProcessTree: true);
+
+            TryDeleteFile(outputPath);
+            throw;
+        }
+        catch (PdfProcessingException)
+        {
+            throw; // уже обёрнуто, пробрасываем как есть
+        }
+        catch (Exception ex)
+        {
+            TryDeleteFile(outputPath);
+            throw new PdfProcessingException(
+                $"Unexpected error during compression: {ex.Message}",
+                PdfOperation.Compress);
+        }
+    }
+
+    // ── Вспомогательные методы ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Возвращает валидное значение -dPDFSETTINGS для Ghostscript.
+    /// </summary>
+    private static string ResolvePdfSettings(IDictionary<string, object>? options)
+    {
+        // Белый список: только то, что GS реально понимает
+        HashSet<string> Allowed =
+        [
+            "/screen",   // 72 dpi  — минимальный размер
+        "/ebook",    // 150 dpi — баланс качества и размера (default)
+        "/printer",  // 300 dpi — печать
+        "/prepress", // 300 dpi + цветовые профили
+        "/default",  // без оптимизации
+    ];
+
+        if (options?.TryGetValue("compress", out var raw) == true
+            && raw is string[] arr
+            && arr.Length == 2
+            && Allowed.Contains(arr[1]))
+        {
+            return arr[1];
+        }
+
+        return "/ebook";
+    }
+
+    /// <summary>
+    /// Ищет исполняемый файл Ghostscript:
+    /// 1) в конфиге (_options.GhostscriptPath)
+    /// 2) в реестре Windows (актуальная установленная версия)
+    /// 3) в PATH (для Linux/macOS — просто "gs")
+    /// </summary>
+    private string ResolveGhostscriptExecutable()
+    {
+        // 1. Реестр Windows — ищем актуальную версию автоматически
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            var fromRegistry = TryFindGhostscriptInRegistry();
+            if (fromRegistry is not null) return fromRegistry;
+        }
+
+        // 1. Fallback: gs из PATH (Linux / macOS / Windows с gs в PATH)
+        return RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? "gswin64c.exe"
+            : "gs";
+    }
+
+    /// <summary>
+    /// Ищет путь к gswin64c.exe через реестр Windows.
+    /// GS пишет ключ вида: HKLM\SOFTWARE\Artifex\GPL Ghostscript\{version}
+    /// </summary>
+    private static string? TryFindGhostscriptInRegistry()
+    {
+        try
+        {
+            const string keyPath = @"SOFTWARE\Artifex\GPL Ghostscript";
+
+            using var baseKey = Registry.LocalMachine.OpenSubKey(keyPath);
+            if (baseKey is null) return null;
+
+            // Берём последнюю (максимальную) версию
+            var latest = baseKey.GetSubKeyNames()
+                .Where(n => Version.TryParse(n, out _))
+                .Select(n => (Name: n, Ver: Version.Parse(n)))
+                .OrderByDescending(x => x.Ver)
+                .FirstOrDefault();
+
+            if (latest == default) return null;
+
+            using var versionKey = baseKey.OpenSubKey(latest.Name);
+            var installDir = versionKey?.GetValue(string.Empty) as string; // default value
+            if (string.IsNullOrEmpty(installDir)) return null;
+
+            var candidate = Path.Combine(installDir, "bin", "gswin64c.exe");
+            return File.Exists(candidate) ? candidate : null;
+        }
+        catch
+        {
+            return null; // реестр недоступен — идём дальше
+        }
+    }
+
+    /// <summary>Удаляет файл, не бросая исключений.</summary>
+    private static void TryDeleteFile(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch { /* ignore */ }
+    }
+
+
     #endregion
 
     #region PDF Operations
