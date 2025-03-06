@@ -2,6 +2,7 @@
 using Microsoft.Win32;
 using PdfService.Application.Interfaces;
 using PdfService.Application.Models;
+using PdfService.Infrastructure.Storage;
 using PdfSharp.Pdf;
 using PdfSharp.Pdf.IO;
 using PuppeteerSharp.Media;
@@ -100,9 +101,17 @@ public class PdfProcessor : IPdfProcessor
 
         var pdfsettings = ResolvePdfSettings(task.Options);
 
-        var inputPath = _storage.GetFullPath(inputFileName);  // ← полный физический путь для GS
+        // Проверяем, работаем ли мы с локальным диском
+        if (_storage is not LocalFileStorage localStorage)
+        {
+            throw new PdfProcessingException(
+                "Ghostscript compression is only supported on local storage.",
+                PdfOperation.Compress);
+        }
+
+        var inputPath = localStorage.GetFullPath(inputFileName);  // ← полный физический путь для GS
         var outputName = $"{Guid.NewGuid():N}_{Path.GetFileNameWithoutExtension(inputFileName)}_compressed.pdf";
-        var outputPath = _storage.GetFullPath(outputName);
+        var outputPath = localStorage.GetFullPath(outputName);
 
         var outputDir = Path.GetDirectoryName(outputPath)
             ?? throw new PdfProcessingException(

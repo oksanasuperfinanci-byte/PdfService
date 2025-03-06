@@ -7,7 +7,7 @@ public interface IFileStorage
     Task<string> SaveAsync(Stream stream, string fileName, CancellationToken cancellationToken = default);
 
     Task<Stream> OpenReadAsync(string filePath);
-    string GetFullPath(string relativePath);
+   // string GetFullPath(string relativePath);
 
     Task DeleteAsync(string filePath);
 
