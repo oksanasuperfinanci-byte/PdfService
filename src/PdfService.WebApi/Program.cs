@@ -1,5 +1,6 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
 using PdfService.WebApi.Extensions;
+using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -64,11 +65,20 @@ app.Use(async (context, next) =>
 });
 
 app.MapControllers();
-app.MapGet("/health", () => Results.Ok(new
+app.MapGet("/health", (IServiceProvider sp) =>
 {
-    status = "healthy",
-    timestamp = DateTime.UtcNow
-}));
+    var redis = sp.GetService<IConnectionMultiplexer>();
+    var redisConnected = redis?.IsConnected ?? false;
+    var taskStoreType = sp.GetRequiredService<PdfService.Application.Interfaces.ITaskStore>().GetType().Name;
+
+    return Results.Ok(new
+    {
+        status = redisConnected || taskStoreType == "InMemoryTaskStore" ? "healthy" : "degraded",
+        timestamp = DateTime.UtcNow,
+        taskStore = taskStoreType,
+        redis = redis != null ? (redisConnected ? "connected" : "disconnected") : "not configured"
+    });
+});
 
 app.MapGet("/", () => Results.Ok(new
 {
