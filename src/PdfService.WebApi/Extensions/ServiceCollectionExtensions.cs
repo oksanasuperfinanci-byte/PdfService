@@ -1,4 +1,5 @@
-﻿using PdfService.Application.Interfaces;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using PdfService.Application.Interfaces;
 using PdfService.Application.Jobs;
 using PdfService.Infrastructure.Services;
 using PdfService.Infrastructure.Storage;
@@ -20,7 +21,22 @@ public static class ServiceCollectionExtensions
 
         services.AddSingleton<IPdfProcessor, PdfProcessor>();
 
-        services.AddHostedService<PdfProcessingWorker>();
+        // Читаем WorkerCount из конфигурации для запуска N параллельных воркеров
+        var storageSection = configuration.GetSection(FileStorageOptions.SectionName);
+        var workerCount = storageSection.GetValue<int?>("WorkerCount") ?? 2;
+
+        for (int i = 0; i < workerCount; i++)
+        {
+            var workerId = i;
+            services.AddSingleton<IHostedService>(sp =>
+                new PdfProcessingWorker(
+                    sp.GetRequiredService<ITaskStore>(),
+                    sp.GetRequiredService<IPdfProcessor>(),
+                    sp.GetRequiredService<ILogger<PdfProcessingWorker>>(),
+                    workerId));
+        }
+
+        services.AddHostedService<StorageCleanupWorker>();
 
         return services;
     }

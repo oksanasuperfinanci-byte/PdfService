@@ -1,4 +1,5 @@
-﻿using Microsoft.IO;
+﻿using Microsoft.Extensions.Options;
+using Microsoft.IO;
 using Microsoft.Win32;
 using PdfService.Application.Interfaces;
 using PdfService.Application.Models;
@@ -25,15 +26,17 @@ public class PdfProcessor : IPdfProcessor
 {
 
     private readonly IFileStorage _storage;
+    private readonly FileStorageOptions _options;
 
     private static readonly RecyclableMemoryStreamManager manager = new RecyclableMemoryStreamManager();
 
     private static bool _browserDownloaded;
     private static readonly SemaphoreSlim _browserDownloadLock = new(1, 1);
 
-    public PdfProcessor(IFileStorage storage)
+    public PdfProcessor(IFileStorage storage, IOptions<FileStorageOptions> options)
     {
         _storage = storage;
+        _options = options.Value;
     }
 
     #region IPdfProcessor
@@ -145,6 +148,11 @@ public class PdfProcessor : IPdfProcessor
 
         using var process = new Process { StartInfo = startInfo };
 
+        // Создаём связанный токен с тайм-аутом для защиты от зависания Ghostscript
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(_options.ExternalProcessTimeoutSeconds));
+        var linkedToken = timeoutCts.Token;
+
         try
         {
             if (!process.Start())
@@ -153,10 +161,10 @@ public class PdfProcessor : IPdfProcessor
 
             // Читаем потоки ДО WaitForExitAsync, иначе возможен дедлок:
             // GS заблокируется на записи в заполненный буфер, а мы — на ожидании выхода.
-            var stdErrTask = process.StandardError.ReadToEndAsync(cancellationToken);
-            var stdOutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            var stdErrTask = process.StandardError.ReadToEndAsync(linkedToken);
+            var stdOutTask = process.StandardOutput.ReadToEndAsync(linkedToken);
 
-            await process.WaitForExitAsync(cancellationToken);
+            await process.WaitForExitAsync(linkedToken);
 
             var stdErr = await stdErrTask;
             var stdOut = await stdOutTask;
@@ -179,6 +187,14 @@ public class PdfProcessor : IPdfProcessor
                 process.Kill(entireProcessTree: true);
 
             TryDeleteFile(outputPath);
+
+            // Различаем тайм-аут и внешнюю отмену
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                throw new PdfProcessingException(
+                    $"Ghostscript process timed out after {_options.ExternalProcessTimeoutSeconds} seconds.",
+                    PdfOperation.Compress);
+            }
             throw;
         }
         catch (PdfProcessingException)
@@ -469,6 +485,11 @@ public class PdfProcessor : IPdfProcessor
         await EnsureBrowserDownloadedAsync();
         progress?.Report(30);
 
+        // Создаём связанный токен с тайм-аутом для защиты от зависания Puppeteer
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(_options.ExternalProcessTimeoutSeconds));
+        var linkedToken = timeoutCts.Token;
+
         // Запускаем браузер
         await using var browser = await PuppeteerSharp.Puppeteer.LaunchAsync(new PuppeteerSharp.LaunchOptions
         {
@@ -481,35 +502,46 @@ public class PdfProcessor : IPdfProcessor
             }
         });
 
-        await using var page = await browser.NewPageAsync();
-        progress?.Report(50);
-
-        await page.SetContentAsync(htmlContent);
-        progress?.Report(70);
-
-        // Генерируем PDF
-        var pdfBytes = await page.PdfDataAsync(new PuppeteerSharp.PdfOptions
+        try
         {
-            Format = PaperFormat.A4,
-            PrintBackground = true,
-            MarginOptions = new MarginOptions
+            await using var page = await browser.NewPageAsync();
+            progress?.Report(50);
+
+            await page.SetContentAsync(htmlContent);
+            progress?.Report(70);
+
+            // Генерируем PDF
+            var pdfBytes = await page.PdfDataAsync(new PuppeteerSharp.PdfOptions
             {
-                Top = "20mm",
-                Bottom = "20mm",
-                Left = "15mm",
-                Right = "15mm"
-            }
-        });
+                Format = PaperFormat.A4,
+                PrintBackground = true,
+                MarginOptions = new MarginOptions
+                {
+                    Top = "20mm",
+                    Bottom = "20mm",
+                    Left = "15mm",
+                    Right = "15mm"
+                }
+            });
 
-        progress?.Report(90);
+            linkedToken.ThrowIfCancellationRequested();
 
-        // Сохраняем результат
-        var outputPath = $"{Guid.NewGuid():N}_convertd.pdf";
-        await using var outputStream = new MemoryStream(pdfBytes);
-        var savedPath = await _storage.SaveAsync(outputStream, outputPath, cancellationToken);
+            progress?.Report(90);
 
-        progress?.Report(100);
-        return savedPath;
+            // Сохраняем результат
+            var outputPath = $"{Guid.NewGuid():N}_convertd.pdf";
+            await using var outputStream = new MemoryStream(pdfBytes);
+            var savedPath = await _storage.SaveAsync(outputStream, outputPath, cancellationToken);
+
+            progress?.Report(100);
+            return savedPath;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new PdfProcessingException(
+                $"Puppeteer HtmlToPdf timed out after {_options.ExternalProcessTimeoutSeconds} seconds.",
+                PdfOperation.HtmlToPdf);
+        }
     }
     #endregion
 

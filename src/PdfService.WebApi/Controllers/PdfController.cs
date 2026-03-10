@@ -199,6 +199,9 @@ namespace PdfService.WebApi.Controllers
             CancellationToken cancellationToken = default)
         {
             var maxSizeBytes = _storageOptions.MaxFileSizeMb * 1024L * 1024L;
+            var maxTotalSizeBytes = _storageOptions.MaxTotalUploadSizeMb * 1024L * 1024L;
+            long totalSize = 0;
+
             foreach (var file in files)
             {
                 if (file.Length > maxSizeBytes)
@@ -208,6 +211,15 @@ namespace PdfService.WebApi.Controllers
                         error = $"File '{file.FileName}' exceeds maximum size of {_storageOptions.MaxFileSizeMb}MB"
                     });
                 }
+                totalSize += file.Length;
+            }
+
+            if (totalSize > maxTotalSizeBytes)
+            {
+                return BadRequest(new
+                {
+                    error = $"Total upload size ({totalSize / (1024 * 1024)}MB) exceeds maximum of {_storageOptions.MaxTotalUploadSizeMb}MB"
+                });
             }
 
             var inputPaths = new List<string>();
