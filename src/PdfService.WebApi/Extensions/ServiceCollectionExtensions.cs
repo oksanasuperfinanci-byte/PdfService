@@ -1,4 +1,4 @@
-﻿using PdfService.Application.Interfaces;
+using PdfService.Application.Interfaces;
 using PdfService.Application.Jobs;
 using PdfService.Infrastructure.Services;
 using PdfService.Infrastructure.Storage;
@@ -13,12 +13,31 @@ public static class ServiceCollectionExtensions
         )
     {
         services.Configure<FileStorageOptions>(configuration.GetSection(FileStorageOptions.SectionName));
+        services.Configure<GotenbergOptions>(configuration.GetSection(GotenbergOptions.SectionName));
 
         services.AddSingleton<IFileStorage, LocalFileStorage>();
-
         services.AddSingleton<ITaskStore, InMemoryTaskStore>();
 
-        services.AddSingleton<IPdfProcessor, PdfProcessor>();
+        // Читаем настройки Gotenberg
+        var gotenbergSection = configuration.GetSection(GotenbergOptions.SectionName);
+        var gotenbergUrl = gotenbergSection.GetValue<string>("BaseUrl");
+
+        if (!string.IsNullOrEmpty(gotenbergUrl))
+        {
+            // Gotenberg доступен — используем GotenbergPdfProcessor
+            var timeoutSeconds = gotenbergSection.GetValue<int?>("TimeoutSeconds") ?? 180;
+
+            services.AddHttpClient<IPdfProcessor, GotenbergPdfProcessor>(client =>
+            {
+                client.BaseAddress = new Uri(gotenbergUrl);
+                client.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
+            });
+        }
+        else
+        {
+            // Gotenberg не настроен — fallback на локальный PdfProcessor
+            services.AddSingleton<IPdfProcessor, PdfProcessor>();
+        }
 
         services.AddHostedService<PdfProcessingWorker>();
 

@@ -81,6 +81,9 @@ app.MapGet("/", () => Results.Ok(new
         split = "POST /api/pdf/split",
         rotate = "POST /api/pdf/rotate",
         extract = "POST /api/pdf/extract",
+        htmlToPdf = "POST /api/pdf/html-to-pdf",
+        compressPdf = "POST /api/pdf/compress-pdf",
+        officeToPdf = "POST /api/pdf/office-to-pdf",
         taskStatus = "GET /api/pdf/tasks/{taskId}",
         download = "GET /api/pdf/download/{taskId}"
     }

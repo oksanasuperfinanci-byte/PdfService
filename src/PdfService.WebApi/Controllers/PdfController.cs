@@ -148,6 +148,47 @@ namespace PdfService.WebApi.Controllers
 
         }
 
+        /// <summary>
+        /// Конвертация Office-документов (docx, xlsx, pptx, odt и др.) в PDF через Gotenberg LibreOffice.
+        /// </summary>
+        [HttpPost("office-to-pdf")]
+        public async Task<ActionResult<PdfTaskResponse>> OfficeToPdf(
+            IFormFile file,
+            [FromQuery] bool landscape = false,
+            CancellationToken cancellationToken = default)
+        {
+            if (file == null)
+            {
+                return BadRequest(new { error = "File is required" });
+            }
+
+            var allowedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+                ".odt", ".ods", ".odp", ".rtf", ".txt", ".csv"
+            };
+
+            var extension = Path.GetExtension(file.FileName);
+            if (!allowedExtensions.Contains(extension))
+            {
+                return BadRequest(new
+                {
+                    error = $"Unsupported file format '{extension}'. Supported: {string.Join(", ", allowedExtensions)}"
+                });
+            }
+
+            var options = new Dictionary<string, object?>
+            {
+                ["landscape"] = landscape
+            };
+
+            return await CreatePdfTaskAsync(
+                PdfOperation.OfficeToPdf,
+                new List<IFormFile> { file },
+                options,
+                cancellationToken);
+        }
+
             [HttpGet("dowload/{taskId:Guid}")]
         public async Task<IActionResult> Download(Guid taskId)
         {
