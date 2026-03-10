@@ -1,0 +1,46 @@
+services:
+  pdf-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5212:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_URLS=http://+:8080
+      # Gotenberg доступен по имени сервиса внутри Docker-сети
+      - Gotenberg__BaseUrl=http://gotenberg:3000
+      - Gotenberg__TimeoutSeconds=180
+      - FileStorage__BasePath=/app/temp-storage
+    volumes:
+      # Persistent volume для temp-storage (переживёт перезапуск контейнера)
+      - pdf-temp-storage:/app/temp-storage
+    depends_on:
+      gotenberg:
+        condition: service_started
+    restart: unless-stopped
+
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    ports:
+      - "3000:3000"
+    # Ограничиваем ресурсы, чтобы тяжёлая конвертация не убила хост
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    environment:
+      # Chromium: отключаем маршруты, которые не используем
+      - CHROMIUM_DISABLE_ROUTES=false
+      # LibreOffice: отключаем маршруты, которые не используем
+      - LIBREOFFICE_DISABLE_ROUTES=false
+      # Таймаут для API-вызовов Gotenberg (совпадает с нашим ExternalProcessTimeoutSeconds)
+      - API_TIMEOUT=180s
+    restart: unless-stopped
+
+volumes:
+  pdf-temp-storage:
