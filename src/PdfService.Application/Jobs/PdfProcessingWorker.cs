@@ -38,10 +38,14 @@ public class PdfProcessingWorker : BackgroundService
         _workerId = workerId;
     }
 
+    private const int MaxErrorDelaySeconds = 30;
+
     #region BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Worker-{WorkerId} started", _workerId);
+
+        var consecutiveErrors = 0;
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -52,6 +56,8 @@ public class PdfProcessingWorker : BackgroundService
                 {
                     continue;
                 }
+
+                consecutiveErrors = 0; // сброс при успешном получении задачи
 
                 _logger.LogInformation(
                     "Worker-{WorkerId} picked up task {TaskId} ({Operation})",
@@ -65,7 +71,16 @@ public class PdfProcessingWorker : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Worker-{WorkerId}: critical error in processing loop", _workerId);
+                consecutiveErrors++;
+                var delaySeconds = Math.Min(
+                    (int)Math.Pow(2, consecutiveErrors),
+                    MaxErrorDelaySeconds);
+
+                _logger.LogError(ex,
+                    "Worker-{WorkerId}: critical error in processing loop (attempt {Attempt}), retrying in {Delay}s",
+                    _workerId, consecutiveErrors, delaySeconds);
+
+                await Task.Delay(TimeSpan.FromSeconds(delaySeconds), stoppingToken);
             }
         }
 

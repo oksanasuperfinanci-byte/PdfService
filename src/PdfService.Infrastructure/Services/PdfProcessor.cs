@@ -3,7 +3,7 @@ using Microsoft.IO;
 using Microsoft.Win32;
 using PdfService.Application.Interfaces;
 using PdfService.Application.Models;
-using PdfService.Infrastructure.Storage;
+
 using PdfSharp.Pdf;
 using PdfSharp.Pdf.IO;
 using PuppeteerSharp.Media;
@@ -101,26 +101,23 @@ public class PdfProcessor : IPdfProcessor
         var inputFileName = task.InputFilePaths?.FirstOrDefault()
     ?? throw new PdfProcessingException("No input file provided.", PdfOperation.Compress);
 
-
         var pdfsettings = ResolvePdfSettings(task.Options);
 
-        // Проверяем, работаем ли мы с локальным диском
-        if (_storage is not LocalFileStorage localStorage)
+        // Работаем через временные файлы — не зависим от конкретной реализации IFileStorage.
+        // Ghostscript требует физические пути на диске, поэтому скачиваем из хранилища
+        // во временную директорию, обрабатываем, и загружаем результат обратно.
+        var tempDir = Path.Combine(Path.GetTempPath(), $"pdfservice_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        var inputPath = Path.Combine(tempDir, "input.pdf");
+        var outputPath = Path.Combine(tempDir, "output_compressed.pdf");
+
+        // Скачиваем входной файл из хранилища во временную директорию
+        await using (var sourceStream = await _storage.OpenReadAsync(inputFileName))
+        await using (var tempFile = new FileStream(inputPath, FileMode.Create, FileAccess.Write))
         {
-            throw new PdfProcessingException(
-                "Ghostscript compression is only supported on local storage.",
-                PdfOperation.Compress);
+            await sourceStream.CopyToAsync(tempFile, cancellationToken);
         }
-
-        var inputPath = localStorage.GetFullPath(inputFileName);  // ← полный физический путь для GS
-        var outputName = $"{Guid.NewGuid():N}_{Path.GetFileNameWithoutExtension(inputFileName)}_compressed.pdf";
-        var outputPath = localStorage.GetFullPath(outputName);
-
-        var outputDir = Path.GetDirectoryName(outputPath)
-            ?? throw new PdfProcessingException(
-                "Cannot resolve output directory.", PdfOperation.Compress);
-
-        Directory.CreateDirectory(outputDir);
 
         // ── 2. Ghostscript ───────────────────────────────────────────────────────
         var gsPath = ResolveGhostscriptExecutable();
@@ -171,22 +168,28 @@ public class PdfProcessor : IPdfProcessor
 
             if (process.ExitCode != 0)
             {
-                TryDeleteFile(outputPath);
+                TryDeleteDirectory(tempDir);
                 throw new PdfProcessingException(
                     $"Ghostscript exited with code {process.ExitCode}. " +
                     $"Stderr: {stdErr} Stdout: {stdOut}",
                     PdfOperation.Compress);
             }
 
+            // Загружаем результат обратно в хранилище
+            var outputName = $"{Guid.NewGuid():N}_{Path.GetFileNameWithoutExtension(inputFileName)}_compressed.pdf";
+            await using var resultStream = new FileStream(outputPath, FileMode.Open, FileAccess.Read);
+            var savedPath = await _storage.SaveAsync(resultStream, outputName, cancellationToken);
+
+            TryDeleteDirectory(tempDir);
             progress?.Report(100);
-            return outputPath;
+            return savedPath;
         }
         catch (OperationCanceledException)
         {
             if (!process.HasExited)
                 process.Kill(entireProcessTree: true);
 
-            TryDeleteFile(outputPath);
+            TryDeleteDirectory(tempDir);
 
             // Различаем тайм-аут и внешнюю отмену
             if (!cancellationToken.IsCancellationRequested)
@@ -203,7 +206,7 @@ public class PdfProcessor : IPdfProcessor
         }
         catch (Exception ex)
         {
-            TryDeleteFile(outputPath);
+            TryDeleteDirectory(tempDir);
             throw new PdfProcessingException(
                 $"Unexpected error during compression: {ex.Message}",
                 PdfOperation.Compress);
@@ -301,12 +304,18 @@ public class PdfProcessor : IPdfProcessor
         catch { /* ignore */ }
     }
 
+    /// <summary>Удаляет временную директорию со всем содержимым, не бросая исключений.</summary>
+    private static void TryDeleteDirectory(string path)
+    {
+        try { if (Directory.Exists(path)) Directory.Delete(path, recursive: true); }
+        catch { /* ignore */ }
+    }
+
 
     #endregion
 
     #region PDF Operations
 
-    // TODO: Реализовать разбивку по страницам указаным пользователем
     private async Task<string> SplitPdfAsync(PdfTask task, IProgress<int>? progress, CancellationToken cancellationToken)
     {
         var inputPath = task.InputFilePaths.FirstOrDefault()
@@ -316,25 +325,38 @@ public class PdfProcessor : IPdfProcessor
         using var inputDocument = PdfReader.Open(inputStream, PdfDocumentOpenMode.Import);
 
         var pageCount = inputDocument.PageCount;
-        var outputPaths = new List<string>();
 
-        for (int i = 0; i < pageCount; i++)
+        // Если одна страница — возвращаем как есть, без ZIP
+        if (pageCount == 1)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
             using var singlePageDoc = new PdfDocument();
-            singlePageDoc.AddPage(inputDocument.Pages[i]);
-
-            var pagePath = await SaveOutputDocumentAsync(singlePageDoc, $"page_{i + 1}.pdf");
-            outputPaths.Add(pagePath);
-
-            progress?.Report((i + 1) * 100 / pageCount);
+            singlePageDoc.AddPage(inputDocument.Pages[0]);
+            progress?.Report(100);
+            return await SaveOutputDocumentAsync(singlePageDoc, "page_1.pdf");
         }
 
-        // Для Split возвращаем путь к первому файлу
-        // В реальности нужно создать ZIP аръив со всеми страницами
-        // TODO: Добавить создание ZIP архива
-        return outputPaths.First();
+        // Собираем все страницы в ZIP-архив
+        using var zipStream = manager.GetStream();
+        using (var archive = new System.IO.Compression.ZipArchive(zipStream, System.IO.Compression.ZipArchiveMode.Create, leaveOpen: true))
+        {
+            for (int i = 0; i < pageCount; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                using var singlePageDoc = new PdfDocument();
+                singlePageDoc.AddPage(inputDocument.Pages[i]);
+
+                var entry = archive.CreateEntry($"page_{i + 1}.pdf", System.IO.Compression.CompressionLevel.Fastest);
+                using var entryStream = entry.Open();
+                singlePageDoc.Save(entryStream);
+
+                progress?.Report((i + 1) * 100 / pageCount);
+            }
+        }
+
+        zipStream.Position = 0;
+        var zipName = $"{Guid.NewGuid():N}_split_pages.zip";
+        return await _storage.SaveAsync(zipStream, zipName, cancellationToken);
     }
 
     private async Task<string> MergePdfAsync(PdfTask task, IProgress<int>? progress, CancellationToken cancellationToken)
