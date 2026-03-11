@@ -36,7 +36,7 @@ namespace PdfService.WebApi.Controllers
         {
             if (files == null || files.Count < 2)
             {
-                return BadRequest(new { error = "At least 2 files are required for merge" });
+                return BadRequest(new { error = "At least 2 files are rewuired for merge" });
             }
 
             return await CreatePdfTaskAsync(PdfOperation.Merge, files, null, cancellationToken);
@@ -148,7 +148,48 @@ namespace PdfService.WebApi.Controllers
 
         }
 
-        [HttpGet("download/{taskId:Guid}")]
+        /// <summary>
+        /// Конвертация Office-документов (docx, xlsx, pptx, odt и др.) в PDF через Gotenberg LibreOffice.
+        /// </summary>
+        [HttpPost("office-to-pdf")]
+        public async Task<ActionResult<PdfTaskResponse>> OfficeToPdf(
+            IFormFile file,
+            [FromQuery] bool landscape = false,
+            CancellationToken cancellationToken = default)
+        {
+            if (file == null)
+            {
+                return BadRequest(new { error = "File is required" });
+            }
+
+            var allowedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+                ".odt", ".ods", ".odp", ".rtf", ".txt", ".csv"
+            };
+
+            var extension = Path.GetExtension(file.FileName);
+            if (!allowedExtensions.Contains(extension))
+            {
+                return BadRequest(new
+                {
+                    error = $"Unsupported file format '{extension}'. Supported: {string.Join(", ", allowedExtensions)}"
+                });
+            }
+
+            var options = new Dictionary<string, object?>
+            {
+                ["landscape"] = landscape
+            };
+
+            return await CreatePdfTaskAsync(
+                PdfOperation.OfficeToPdf,
+                new List<IFormFile> { file },
+                options,
+                cancellationToken);
+        }
+
+            [HttpGet("dowload/{taskId:Guid}")]
         public async Task<IActionResult> Download(Guid taskId)
         {
             var task = await _taskStore.GetAsync(taskId);
@@ -179,19 +220,15 @@ namespace PdfService.WebApi.Controllers
             }
 
             var stream = await _storage.OpenReadAsync(task.OutputFilePath);
-
-            var isZip = task.OutputFilePath.EndsWith(".zip", StringComparison.OrdinalIgnoreCase);
-            var contentType = isZip ? "application/zip" : "application/pdf";
-            var extension = isZip ? ".zip" : ".pdf";
             var fileName = task.Operation switch
             {
-                PdfOperation.Merge => "merged_document.pdf",
-                PdfOperation.Split => "split_pages.zip",
-                PdfOperation.Rotate => "rotated_document.pdf",
-                _ => $"output{extension}"
+                PdfOperation.Merge => "merge_document.pdf",
+                PdfOperation.Split => "page_1.pdf",
+                PdfOperation.Rotate => "rotate_document.pdf",
+                _ => "outpit.pdf"
             };
 
-            return File(stream, contentType, fileName);
+            return File(stream, "application/pdf", fileName);
         }
 
         #region Private helper methods
@@ -203,9 +240,6 @@ namespace PdfService.WebApi.Controllers
             CancellationToken cancellationToken = default)
         {
             var maxSizeBytes = _storageOptions.MaxFileSizeMb * 1024L * 1024L;
-            var maxTotalSizeBytes = _storageOptions.MaxTotalUploadSizeMb * 1024L * 1024L;
-            long totalSize = 0;
-
             foreach (var file in files)
             {
                 if (file.Length > maxSizeBytes)
@@ -215,15 +249,6 @@ namespace PdfService.WebApi.Controllers
                         error = $"File '{file.FileName}' exceeds maximum size of {_storageOptions.MaxFileSizeMb}MB"
                     });
                 }
-                totalSize += file.Length;
-            }
-
-            if (totalSize > maxTotalSizeBytes)
-            {
-                return BadRequest(new
-                {
-                    error = $"Total upload size ({totalSize / (1024 * 1024)}MB) exceeds maximum of {_storageOptions.MaxTotalUploadSizeMb}MB"
-                });
             }
 
             var inputPaths = new List<string>();
@@ -238,8 +263,6 @@ namespace PdfService.WebApi.Controllers
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to save uploaded files for {Operation}", operation);
-
                 foreach (var path in inputPaths)
                 {
                     await _storage.DeleteAsync(path);

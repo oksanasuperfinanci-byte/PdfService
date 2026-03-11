@@ -1,8 +1,8 @@
-using Microsoft.Extensions.DependencyInjection.Extensions;
 using PdfService.Application.Interfaces;
 using PdfService.Application.Jobs;
 using PdfService.Infrastructure.Services;
 using PdfService.Infrastructure.Storage;
+using StackExchange.Redis;
 
 namespace PdfService.WebApi.Extensions;
 
@@ -13,30 +13,64 @@ public static class ServiceCollectionExtensions
         IConfiguration configuration
         )
     {
+        // ── Настройки ──────────────────────────────────────────────
         services.Configure<FileStorageOptions>(configuration.GetSection(FileStorageOptions.SectionName));
+        services.Configure<GotenbergOptions>(configuration.GetSection(GotenbergOptions.SectionName));
 
+        // ── Файловое хранилище ─────────────────────────────────────
         services.AddSingleton<IFileStorage, LocalFileStorage>();
 
-        services.AddSingleton<ITaskStore, InMemoryTaskStore>();
+        // ── Task Store: Redis или InMemory ─────────────────────────
+        var redisConnection = configuration.GetSection("Redis")
+            .GetValue<string>("ConnectionString");
 
-        services.AddSingleton<IPdfProcessor, PdfProcessor>();
-
-        // Читаем WorkerCount из конфигурации для запуска N параллельных воркеров
-        var storageSection = configuration.GetSection(FileStorageOptions.SectionName);
-        var workerCount = storageSection.GetValue<int?>("WorkerCount") ?? 2;
-
-        for (int i = 0; i < workerCount; i++)
+        if (!string.IsNullOrEmpty(redisConnection))
         {
-            var workerId = i;
-            services.AddSingleton<IHostedService>(sp =>
-                new PdfProcessingWorker(
-                    sp.GetRequiredService<ITaskStore>(),
-                    sp.GetRequiredService<IPdfProcessor>(),
-                    sp.GetRequiredService<ILogger<PdfProcessingWorker>>(),
-                    workerId));
+            // Redis доступен — distributed mode
+            // IConnectionMultiplexer — singleton, потокобезопасный, мультиплексирует соединения.
+            // Создаём один экземпляр на всё приложение.
+            services.AddSingleton<IConnectionMultiplexer>(sp =>
+            {
+                var logger = sp.GetRequiredService<ILogger<RedisTaskStore>>();
+                logger.LogInformation("Connecting to Redis: {Connection}", redisConnection);
+
+                var options = ConfigurationOptions.Parse(redisConnection);
+                options.AbortOnConnectFail = false;  // Не падаем при старте, если Redis ещё не готов
+                options.ConnectRetry = 3;            // 3 попытки подключения
+                options.ConnectTimeout = 5000;       // 5 сек на подключение
+
+                return ConnectionMultiplexer.Connect(options);
+            });
+
+            services.AddSingleton<ITaskStore, RedisTaskStore>();
+        }
+        else
+        {
+            // Redis не настроен — InMemory fallback для локальной разработки
+            services.AddSingleton<ITaskStore, InMemoryTaskStore>();
         }
 
-        services.AddHostedService<StorageCleanupWorker>();
+        // ── PDF Processor: Gotenberg или локальный ─────────────────
+        var gotenbergSection = configuration.GetSection(GotenbergOptions.SectionName);
+        var gotenbergUrl = gotenbergSection.GetValue<string>("BaseUrl");
+
+        if (!string.IsNullOrEmpty(gotenbergUrl))
+        {
+            var timeoutSeconds = gotenbergSection.GetValue<int?>("TimeoutSeconds") ?? 180;
+
+            services.AddHttpClient<IPdfProcessor, GotenbergPdfProcessor>(client =>
+            {
+                client.BaseAddress = new Uri(gotenbergUrl);
+                client.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
+            });
+        }
+        else
+        {
+            services.AddSingleton<IPdfProcessor, PdfProcessor>();
+        }
+
+        // ── Background Workers ─────────────────────────────────────
+        services.AddHostedService<PdfProcessingWorker>();
 
         return services;
     }

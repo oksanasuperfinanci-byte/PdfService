@@ -1,0 +1,62 @@
+services:
+  pdf-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5212:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_URLS=http://+:8080
+      # Gotenberg доступен по имени сервиса внутри Docker-сети
+      - Gotenberg__BaseUrl=http://gotenberg:3000
+      - Gotenberg__TimeoutSeconds=180
+      - FileStorage__BasePath=/app/temp-storage
+      # Redis доступен по имени сервиса внутри Docker-сети
+      - Redis__ConnectionString=redis:6379
+    volumes:
+      - pdf-temp-storage:/app/temp-storage
+    depends_on:
+      gotenberg:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    ports:
+      - "3000:3000"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    environment:
+      - CHROMIUM_DISABLE_ROUTES=false
+      - LIBREOFFICE_DISABLE_ROUTES=false
+      - API_TIMEOUT=180s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      # Persistent volume — данные переживут перезапуск контейнера
+      - pdf-redis-data:/data
+    # Включаем AOF (Append Only File) для персистентности
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  pdf-temp-storage:
+  pdf-redis-data:

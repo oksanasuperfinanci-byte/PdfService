@@ -1,5 +1,6 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
 using PdfService.WebApi.Extensions;
+using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -9,10 +10,10 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddPdfCors();
 
-builder.Services.AddRazorPages();
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
     {
+        //
         options.JsonSerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
         options.JsonSerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
     });
@@ -63,20 +64,39 @@ app.Use(async (context, next) =>
         );
 });
 
-app.UseStaticFiles();
-app.MapRazorPages();
 app.MapControllers();
-app.MapGet("/health", () => Results.Ok(new
+app.MapGet("/health", (IServiceProvider sp) =>
 {
-    status = "healthy",
-    timestamp = DateTime.UtcNow
-}));
+    var redis = sp.GetService<IConnectionMultiplexer>();
+    var redisConnected = redis?.IsConnected ?? false;
+    var taskStoreType = sp.GetRequiredService<PdfService.Application.Interfaces.ITaskStore>().GetType().Name;
 
-app.MapGet("/api", () => Results.Ok(new
+    return Results.Ok(new
+    {
+        status = redisConnected || taskStoreType == "InMemoryTaskStore" ? "healthy" : "degraded",
+        timestamp = DateTime.UtcNow,
+        taskStore = taskStoreType,
+        redis = redis != null ? (redisConnected ? "connected" : "disconnected") : "not configured"
+    });
+});
+
+app.MapGet("/", () => Results.Ok(new
 {
     name = "PDF Service",
     version = "1.0.0",
-    documentation = "/swagger"
+    documentation = "/swagger",
+    endpoints = new
+    {
+        merge = "POST /api/pdf/merge",
+        split = "POST /api/pdf/split",
+        rotate = "POST /api/pdf/rotate",
+        extract = "POST /api/pdf/extract",
+        htmlToPdf = "POST /api/pdf/html-to-pdf",
+        compressPdf = "POST /api/pdf/compress-pdf",
+        officeToPdf = "POST /api/pdf/office-to-pdf",
+        taskStatus = "GET /api/pdf/tasks/{taskId}",
+        download = "GET /api/pdf/download/{taskId}"
+    }
 }));
 
 app.UseHttpsRedirection();
