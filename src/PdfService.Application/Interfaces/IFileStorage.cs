@@ -28,4 +28,19 @@ public class FileStorageOptions
     public int FileLifetimeHours { get; set; } = 2;
 
     public int MaxFileSizeMb { get; set; } = 100;
+
+    /// <summary>
+    /// Максимальный суммарный размер всех загружаемых файлов в одном запросе (МБ)
+    /// </summary>
+    public int MaxTotalUploadSizeMb { get; set; } = 200;
+
+    /// <summary>
+    /// Количество параллельных воркеров для обработки PDF задач
+    /// </summary>
+    public int WorkerCount { get; set; } = 2;
+
+    /// <summary>
+    /// Тайм-аут для внешних процессов (Ghostscript, Puppeteer) в секундах
+    /// </summary>
+    public int ExternalProcessTimeoutSeconds { get; set; } = 180;
 }
