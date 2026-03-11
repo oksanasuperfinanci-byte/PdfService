@@ -1,0 +1,80 @@
+@page "{id:guid}"
+@model TaskStatusModel
+@{
+    ViewData["Title"] = "Task Status";
+    var task = Model.PdfTask!;
+    var badgeClass = task.Status switch
+    {
+        Application.Models.TaskStatus.Pending => "badge-pending",
+        Application.Models.TaskStatus.Processing => "badge-processing",
+        Application.Models.TaskStatus.Completed => "badge-completed",
+        Application.Models.TaskStatus.Failed => "badge-failed",
+        Application.Models.TaskStatus.Expired => "badge-expired",
+        _ => ""
+    };
+    var isActive = task.Status == Application.Models.TaskStatus.Pending
+                || task.Status == Application.Models.TaskStatus.Processing;
+}
+
+<h1>Task Details</h1>
+
+<div class="card">
+    <table>
+        <tr>
+            <th>Task ID</th>
+            <td>@task.Id</td>
+        </tr>
+        <tr>
+            <th>Operation</th>
+            <td>@task.Operation</td>
+        </tr>
+        <tr>
+            <th>Status</th>
+            <td><span class="badge @badgeClass">@task.Status</span></td>
+        </tr>
+        <tr>
+            <th>Progress</th>
+            <td>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: @(task.ProgressPercent)%"></div>
+                </div>
+                <span class="text-muted">@task.ProgressPercent%</span>
+            </td>
+        </tr>
+        <tr>
+            <th>Created</th>
+            <td>@task.CreateAt.ToString("yyyy-MM-dd HH:mm:ss")</td>
+        </tr>
+        <tr>
+            <th>Updated</th>
+            <td>@task.UpdateAt.ToString("yyyy-MM-dd HH:mm:ss")</td>
+        </tr>
+        @if (task.Status == Application.Models.TaskStatus.Failed && !string.IsNullOrEmpty(task.ErrorMessage))
+        {
+            <tr>
+                <th>Error</th>
+                <td><div class="alert alert-error">@task.ErrorMessage</div></td>
+            </tr>
+        }
+    </table>
+
+    @if (task.Status == Application.Models.TaskStatus.Completed && Model.FileExists)
+    {
+        <div class="mt-2">
+            <a href="/download/@task.Id" class="btn btn-primary">Download Result</a>
+        </div>
+    }
+
+    <div class="mt-2">
+        <a href="/" class="btn btn-secondary">Back to Dashboard</a>
+    </div>
+</div>
+
+@if (isActive)
+{
+    @section Scripts {
+        <script>
+            setTimeout(function() { location.reload(); }, 2000);
+        </script>
+    }
+}
