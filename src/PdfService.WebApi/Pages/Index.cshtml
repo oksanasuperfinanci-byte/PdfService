@@ -1,0 +1,138 @@
+@page
+@model IndexModel
+@{
+    ViewData["Title"] = "Dashboard";
+}
+
+<h1>PDF Operations</h1>
+
+<div class="grid">
+    <!-- Merge -->
+    <div class="card">
+        <h2>Merge PDFs</h2>
+        <p class="text-muted">Combine multiple PDF files into one</p>
+        <form method="post" enctype="multipart/form-data">
+            <input type="hidden" name="Operation" value="Merge" />
+            <label>Select PDF files</label>
+            <input type="file" name="Files" multiple accept=".pdf" required />
+            <button type="submit" class="btn btn-primary">Merge</button>
+        </form>
+    </div>
+
+    <!-- Split -->
+    <div class="card">
+        <h2>Split PDF</h2>
+        <p class="text-muted">Split a PDF into separate pages</p>
+        <form method="post" enctype="multipart/form-data">
+            <input type="hidden" name="Operation" value="Split" />
+            <label>Select PDF file</label>
+            <input type="file" name="Files" accept=".pdf" required />
+            <label>Pages (optional, e.g. 1,3,5-10)</label>
+            <input type="text" name="Pages" placeholder="Leave empty for all pages" />
+            <button type="submit" class="btn btn-primary">Split</button>
+        </form>
+    </div>
+
+    <!-- Compress -->
+    <div class="card">
+        <h2>Compress PDF</h2>
+        <p class="text-muted">Reduce PDF file size</p>
+        <form method="post" enctype="multipart/form-data">
+            <input type="hidden" name="Operation" value="Compress" />
+            <label>Select PDF file</label>
+            <input type="file" name="Files" accept=".pdf" required />
+            <button type="submit" class="btn btn-primary">Compress</button>
+        </form>
+    </div>
+
+    <!-- Rotate -->
+    <div class="card">
+        <h2>Rotate Pages</h2>
+        <p class="text-muted">Rotate all pages in a PDF</p>
+        <form method="post" enctype="multipart/form-data">
+            <input type="hidden" name="Operation" value="Rotate" />
+            <label>Select PDF file</label>
+            <input type="file" name="Files" accept=".pdf" required />
+            <label>Angle</label>
+            <select name="Angle">
+                <option value="90">90°</option>
+                <option value="180">180°</option>
+                <option value="270">270°</option>
+            </select>
+            <button type="submit" class="btn btn-primary">Rotate</button>
+        </form>
+    </div>
+
+    <!-- Extract Pages -->
+    <div class="card">
+        <h2>Extract Pages</h2>
+        <p class="text-muted">Extract specific pages from a PDF</p>
+        <form method="post" enctype="multipart/form-data">
+            <input type="hidden" name="Operation" value="ExtractPages" />
+            <label>Select PDF file</label>
+            <input type="file" name="Files" accept=".pdf" required />
+            <label>Pages (e.g. 1,3,5-10)</label>
+            <input type="text" name="Pages" placeholder="1,2,5-10" required />
+            <button type="submit" class="btn btn-primary">Extract</button>
+        </form>
+    </div>
+
+    <!-- HTML to PDF -->
+    <div class="card">
+        <h2>HTML to PDF</h2>
+        <p class="text-muted">Convert HTML content to PDF</p>
+        <form method="post">
+            <input type="hidden" name="Operation" value="HtmlToPdf" />
+            <label>HTML Content</label>
+            <textarea name="HtmlContent" placeholder="<h1>Hello World</h1><p>Your HTML here...</p>"></textarea>
+            <button type="submit" class="btn btn-primary">Convert</button>
+        </form>
+    </div>
+</div>
+
+@if (Model.RecentTasks.Any())
+{
+    <h2 class="mt-2">Recent Tasks</h2>
+    <div class="card">
+        <table>
+            <thead>
+                <tr>
+                    <th>Operation</th>
+                    <th>Status</th>
+                    <th>Progress</th>
+                    <th>Created</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var task in Model.RecentTasks)
+                {
+                    <tr>
+                        <td>@task.Operation</td>
+                        <td>
+                            @{
+                                var badgeClass = task.Status switch
+                                {
+                                    Application.Models.TaskStatus.Pending => "badge-pending",
+                                    Application.Models.TaskStatus.Processing => "badge-processing",
+                                    Application.Models.TaskStatus.Completed => "badge-completed",
+                                    Application.Models.TaskStatus.Failed => "badge-failed",
+                                    Application.Models.TaskStatus.Expired => "badge-expired",
+                                    _ => ""
+                                };
+                            }
+                            <span class="badge @badgeClass">@task.Status</span>
+                        </td>
+                        <td>
+                            <div class="progress-bar">
+                                <div class="progress-fill" style="width: @(task.ProgressPercent)%"></div>
+                            </div>
+                        </td>
+                        <td class="text-muted">@task.CreateAt.ToString("HH:mm:ss")</td>
+                        <td><a href="/taskstatus/@task.Id" class="btn btn-secondary">Details</a></td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
