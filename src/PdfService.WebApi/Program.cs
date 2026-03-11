@@ -9,10 +9,10 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddPdfCors();
 
+builder.Services.AddRazorPages();
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
     {
-        //
         options.JsonSerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
         options.JsonSerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
     });
@@ -63,6 +63,8 @@ app.Use(async (context, next) =>
         );
 });
 
+app.UseStaticFiles();
+app.MapRazorPages();
 app.MapControllers();
 app.MapGet("/health", () => Results.Ok(new
 {
@@ -70,20 +72,11 @@ app.MapGet("/health", () => Results.Ok(new
     timestamp = DateTime.UtcNow
 }));
 
-app.MapGet("/", () => Results.Ok(new
+app.MapGet("/api", () => Results.Ok(new
 {
     name = "PDF Service",
     version = "1.0.0",
-    documentation = "/swagger",
-    endpoints = new
-    {
-        merge = "POST /api/pdf/merge",
-        split = "POST /api/pdf/split",
-        rotate = "POST /api/pdf/rotate",
-        extract = "POST /api/pdf/extract",
-        taskStatus = "GET /api/pdf/tasks/{taskId}",
-        download = "GET /api/pdf/download/{taskId}"
-    }
+    documentation = "/swagger"
 }));
 
 app.UseHttpsRedirection();
