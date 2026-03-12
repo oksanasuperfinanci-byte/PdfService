@@ -233,15 +233,20 @@ namespace PdfService.WebApi.Controllers
             }
 
             var stream = await _storage.OpenReadAsync(task.OutputFilePath);
-            var fileName = task.Operation switch
+
+            var isZip = task.OutputFilePath.EndsWith(".zip", StringComparison.OrdinalIgnoreCase);
+            var (contentType, fileName) = (task.Operation, isZip) switch
             {
-                PdfOperation.Merge => "merge_document.pdf",
-                PdfOperation.Split => "page_1.pdf",
-                PdfOperation.Rotate => "rotate_document.pdf",
-                _ => "output.pdf"
+                (PdfOperation.Split, true)  => ("application/zip", "split_pages.zip"),
+                (PdfOperation.Merge, _)     => ("application/pdf", "merge_document.pdf"),
+                (PdfOperation.Rotate, _)    => ("application/pdf", "rotate_document.pdf"),
+                (PdfOperation.Split, false) => ("application/pdf", "page_1.pdf"),
+                _                           => isZip
+                    ? ("application/zip", "output.zip")
+                    : ("application/pdf", "output.pdf")
             };
 
-            return File(stream, "application/pdf", fileName);
+            return File(stream, contentType, fileName);
         }
 
         #region Private helper methods
@@ -276,6 +281,7 @@ namespace PdfService.WebApi.Controllers
             }
             catch (Exception ex)
             {
+                _logger.LogError(ex, "Failed to save uploaded files for operation {Operation}", operation);
                 foreach (var path in inputPaths)
                 {
                     await _storage.DeleteAsync(path);

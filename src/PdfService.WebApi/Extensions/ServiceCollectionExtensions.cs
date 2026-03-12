@@ -54,6 +54,10 @@ public static class ServiceCollectionExtensions
         var gotenbergSection = configuration.GetSection(GotenbergOptions.SectionName);
         var gotenbergUrl = gotenbergSection.GetValue<string>("BaseUrl");
 
+        // PdfProcessor регистрируется всегда — GotenbergPdfProcessor делегирует ему
+        // локальные операции (Merge, Split, Rotate, ExtractPages), избегая дублирования кода.
+        services.AddSingleton<PdfProcessor>();
+
         if (!string.IsNullOrEmpty(gotenbergUrl))
         {
             var timeoutSeconds = gotenbergSection.GetValue<int?>("TimeoutSeconds") ?? 180;
@@ -66,7 +70,7 @@ public static class ServiceCollectionExtensions
         }
         else
         {
-            services.AddSingleton<IPdfProcessor, PdfProcessor>();
+            services.AddSingleton<IPdfProcessor>(sp => sp.GetRequiredService<PdfProcessor>());
         }
 
         // ── Background Workers ─────────────────────────────────────

@@ -41,8 +41,12 @@ public class RedisTaskStore : ITaskStore
     // Префиксы ключей Redis
     private const string TaskPrefix = "task:";
     private const string QueueKey = "task:queue";
+    private const string ProcessingQueueKey = "task:processing";
     private const string StatusPrefix = "task:status:";
     private const string CreatedSortedSetKey = "task:created";
+
+    // Максимальное число повторов при конфликте оптимистичной блокировки
+    private const int OptimisticRetries = 3;
 
     public RedisTaskStore(
         IConnectionMultiplexer redis,
@@ -107,32 +111,62 @@ public class RedisTaskStore : ITaskStore
     {
         var db = Db;
         var taskKey = TaskPrefix + task.Id;
-
-        // Читаем старый статус, чтобы обновить индекс
-        var oldJson = await db.StringGetAsync(taskKey);
-        TaskStatus? oldStatus = null;
-
-        if (!oldJson.IsNullOrEmpty)
-        {
-            var oldTask = JsonSerializer.Deserialize<PdfTask>(oldJson!, JsonOptions);
-            oldStatus = oldTask?.Status;
-        }
+        var taskIdStr = task.Id.ToString();
 
         task.UpdateAt = DateTime.UtcNow;
-        var newJson = JsonSerializer.Serialize(task, JsonOptions);
 
-        var tran = db.CreateTransaction();
-
-        _ = tran.StringSetAsync(taskKey, newJson);
-
-        // Обновляем индекс статуса, если статус изменился
-        if (oldStatus.HasValue && oldStatus.Value != task.Status)
+        // Оптимистичная блокировка: читаем текущее значение, добавляем WATCH-условие в транзакцию.
+        // Если между чтением и EXEC другой процесс записал новое значение — транзакция отклонится,
+        // и мы повторим попытку с актуальными данными.
+        for (var attempt = 0; attempt <= OptimisticRetries; attempt++)
         {
-            _ = tran.SetRemoveAsync(StatusPrefix + oldStatus.Value, task.Id.ToString());
-            _ = tran.SetAddAsync(StatusPrefix + task.Status, task.Id.ToString());
+            var oldJson = await db.StringGetAsync(taskKey);
+            TaskStatus? oldStatus = null;
+
+            if (!oldJson.IsNullOrEmpty)
+            {
+                var oldTask = JsonSerializer.Deserialize<PdfTask>(oldJson!, JsonOptions);
+                oldStatus = oldTask?.Status;
+            }
+
+            var newJson = JsonSerializer.Serialize(task, JsonOptions);
+
+            var tran = db.CreateTransaction();
+            // WATCH: транзакция упадёт, если taskKey изменился после нашего чтения
+            tran.AddCondition(Condition.StringEqual(taskKey, oldJson));
+
+            _ = tran.StringSetAsync(taskKey, newJson);
+
+            // Обновляем индекс статуса, если статус изменился
+            if (oldStatus.HasValue && oldStatus.Value != task.Status)
+            {
+                _ = tran.SetRemoveAsync(StatusPrefix + oldStatus.Value, taskIdStr);
+                _ = tran.SetAddAsync(StatusPrefix + task.Status, taskIdStr);
+            }
+
+            // Удаляем из processing-очереди при переходе в терминальный статус.
+            // Это гарантирует, что потерянные при краше воркера задачи можно восстановить
+            // из task:processing (Reliable Queue pattern).
+            var isTerminal = task.Status is TaskStatus.Completed or TaskStatus.Failed;
+            if (isTerminal)
+            {
+                _ = tran.ListRemoveAsync(ProcessingQueueKey, taskIdStr);
+            }
+
+            if (await tran.ExecuteAsync())
+                return;
+
+            if (attempt < OptimisticRetries)
+            {
+                _logger.LogWarning(
+                    "UpdateAsync optimistic lock conflict for task {TaskId}, retrying ({Attempt}/{Max})",
+                    task.Id, attempt + 1, OptimisticRetries);
+            }
         }
 
-        await tran.ExecuteAsync();
+        _logger.LogError(
+            "UpdateAsync failed after {Retries} retries for task {TaskId} due to concurrent modifications",
+            OptimisticRetries, task.Id);
     }
 
     public async Task DeleteAsync(Guid taskId, CancellationToken cancellationToken = default)
@@ -161,16 +195,18 @@ public class RedisTaskStore : ITaskStore
     #region ITaskStore — Queue
 
     /// <summary>
-    /// Атомарно извлекает следующую задачу из очереди.
+    /// Атомарно извлекает следующую задачу из очереди по паттерну Reliable Queue.
     ///
-    /// Используем BLPOP — блокирующий POP из Redis List:
-    ///   - Атомарный: два воркера никогда не возьмут одну задачу
-    ///   - Блокирующий: не требует polling, Redis сам уведомит
-    ///   - Таймаут 5 сек: позволяет проверять CancellationToken
+    /// Используем LMOVE (ListMoveAsync LEFT→LEFT):
+    ///   - Атомарно перемещает task ID из task:queue → task:processing
+    ///   - FIFO-порядок: AddTask делает RPUSH, DequeueAsync делает LPOP
+    ///   - Два воркера никогда не возьмут одну задачу
+    ///   - Если воркер упадёт с OOM до UpdateAsync(Completed/Failed),
+    ///     task ID останется в task:processing и может быть восстановлен
+    ///     внешним watchdog-процессом (stuck-task recovery).
     ///
-    /// Почему таймаут 5 сек, а не бесконечный:
-    ///   StackExchange.Redis не поддерживает отмену BLPOP через CancellationToken.
-    ///   Поэтому мы ставим короткий таймаут и проверяем token в цикле.
+    /// Удаление из task:processing происходит в UpdateAsync при переходе
+    /// в терминальный статус (Completed / Failed).
     /// </summary>
     public async Task<PdfTask?> DequeueAsync(CancellationToken cancellationToken = default)
     {
@@ -178,12 +214,15 @@ public class RedisTaskStore : ITaskStore
 
         while (!cancellationToken.IsCancellationRequested)
         {
-            // BLPOP с таймаутом 5 секунд
-            var result = await db.ListLeftPopAsync(QueueKey);
+            // LMOVE task:queue task:processing LEFT LEFT:
+            //   атомарно pop из головы task:queue (FIFO-порядок) + push в голову task:processing.
+            //   Если воркер упадёт до UpdateAsync(Completed/Failed), task ID останется
+            //   в task:processing и может быть восстановлен watchdog-процессом.
+            var result = await db.ListMoveAsync(QueueKey, ProcessingQueueKey, ListSide.Left, ListSide.Left);
 
             if (result.IsNull)
             {
-                // Очередь пуста — ждём немного и пробуем снова
+                // Очередь пуста — короткий polling-sleep, затем снова
                 try
                 {
                     await Task.Delay(1000, cancellationToken);
@@ -200,14 +239,16 @@ public class RedisTaskStore : ITaskStore
 
             if (task == null)
             {
-                _logger.LogWarning("Task {TaskId} from queue not found in store, skipping", taskId);
+                _logger.LogWarning("Task {TaskId} from queue not found in store, removing from processing queue", taskId);
+                await db.ListRemoveAsync(ProcessingQueueKey, taskId.ToString());
                 continue;
             }
 
-            // Проверяем, что задача ещё Pending (могла быть отменена)
+            // Задача могла быть отменена пока ждала в очереди
             if (task.Status != TaskStatus.Pending)
             {
                 _logger.LogDebug("Task {TaskId} is no longer Pending ({Status}), skipping", taskId, task.Status);
+                await db.ListRemoveAsync(ProcessingQueueKey, taskId.ToString());
                 continue;
             }
 
