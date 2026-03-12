@@ -36,7 +36,7 @@ namespace PdfService.WebApi.Controllers
         {
             if (files == null || files.Count < 2)
             {
-                return BadRequest(new { error = "At least 2 files are rewuired for merge" });
+                return BadRequest(new { error = "At least 2 files are required for merge" });
             }
 
             return await CreatePdfTaskAsync(PdfOperation.Merge, files, null, cancellationToken);
@@ -123,29 +123,20 @@ namespace PdfService.WebApi.Controllers
         }
 
         [HttpPost("compress-pdf")]
-        public async Task<ActionResult<PdfTaskResponse>> CompressPdf( IFormFile file, CancellationToken cancellationToken)
+        public async Task<ActionResult<PdfTaskResponse>> CompressPdf(IFormFile file, CancellationToken cancellationToken)
         {
             if (file == null)
             {
-                return BadRequest(new { error = "Compress content is required" });
+                return BadRequest(new { error = "File is required" });
             }
 
-            var inputPaths = new List<string>();
             var options = new Dictionary<string, object> { ["compress"] = new[] { file.Name, "/ebook" } };
-
-            var taskRequest = new PdfTaskRequest
-            {
-                Operation = PdfOperation.Compress,
-                InputFilePaths = inputPaths,
-                Options = options
-            };
 
             return await CreatePdfTaskAsync(
                PdfOperation.Compress,
                new List<IFormFile> { file },
                options,
                cancellationToken);
-
         }
 
         /// <summary>
@@ -189,7 +180,29 @@ namespace PdfService.WebApi.Controllers
                 cancellationToken);
         }
 
-            [HttpGet("dowload/{taskId:Guid}")]
+        [HttpGet("tasks/{taskId:Guid}")]
+        public async Task<ActionResult<PdfTaskResponse>> GetTaskStatus(Guid taskId)
+        {
+            var task = await _taskStore.GetAsync(taskId);
+            if (task == null)
+                return NotFound(new { error = "Task not found" });
+
+            return Ok(new PdfTaskResponse
+            {
+                TaskId = task.Id,
+                Status = task.Status,
+                Operation = task.Operation,
+                ProcessPercent = task.ProgressPercent,
+                ErrorMessage = task.ErrorMessage,
+                DownloadUrl = task.Status == TaskStatus.Completed
+                    ? $"/api/pdf/download/{task.Id}"
+                    : null,
+                CreateAt = task.CreateAt,
+                UpdateAt = task.UpdateAt
+            });
+        }
+
+        [HttpGet("download/{taskId:Guid}")]
         public async Task<IActionResult> Download(Guid taskId)
         {
             var task = await _taskStore.GetAsync(taskId);
@@ -220,15 +233,20 @@ namespace PdfService.WebApi.Controllers
             }
 
             var stream = await _storage.OpenReadAsync(task.OutputFilePath);
-            var fileName = task.Operation switch
+
+            var isZip = task.OutputFilePath.EndsWith(".zip", StringComparison.OrdinalIgnoreCase);
+            var (contentType, fileName) = (task.Operation, isZip) switch
             {
-                PdfOperation.Merge => "merge_document.pdf",
-                PdfOperation.Split => "page_1.pdf",
-                PdfOperation.Rotate => "rotate_document.pdf",
-                _ => "outpit.pdf"
+                (PdfOperation.Split, true)  => ("application/zip", "split_pages.zip"),
+                (PdfOperation.Merge, _)     => ("application/pdf", "merge_document.pdf"),
+                (PdfOperation.Rotate, _)    => ("application/pdf", "rotate_document.pdf"),
+                (PdfOperation.Split, false) => ("application/pdf", "page_1.pdf"),
+                _                           => isZip
+                    ? ("application/zip", "output.zip")
+                    : ("application/pdf", "output.pdf")
             };
 
-            return File(stream, "application/pdf", fileName);
+            return File(stream, contentType, fileName);
         }
 
         #region Private helper methods
@@ -263,6 +281,7 @@ namespace PdfService.WebApi.Controllers
             }
             catch (Exception ex)
             {
+                _logger.LogError(ex, "Failed to save uploaded files for operation {Operation}", operation);
                 foreach (var path in inputPaths)
                 {
                     await _storage.DeleteAsync(path);

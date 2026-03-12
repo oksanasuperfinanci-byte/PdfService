@@ -1,11 +1,7 @@
 using System.Net.Http.Headers;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
-using Microsoft.IO;
 using PdfService.Application.Interfaces;
 using PdfService.Application.Models;
-using PdfSharp.Pdf;
-using PdfSharp.Pdf.IO;
 
 namespace PdfService.Infrastructure.Services;
 
@@ -22,17 +18,18 @@ public class GotenbergPdfProcessor : IPdfProcessor
 {
     private readonly HttpClient _httpClient;
     private readonly IFileStorage _storage;
+    private readonly PdfProcessor _localProcessor;
     private readonly ILogger<GotenbergPdfProcessor> _logger;
-
-    private static readonly RecyclableMemoryStreamManager MemoryStreamManager = new();
 
     public GotenbergPdfProcessor(
         HttpClient httpClient,
         IFileStorage storage,
+        PdfProcessor localProcessor,
         ILogger<GotenbergPdfProcessor> logger)
     {
         _httpClient = httpClient;
         _storage = storage;
+        _localProcessor = localProcessor;
         _logger = logger;
     }
 
@@ -61,11 +58,13 @@ public class GotenbergPdfProcessor : IPdfProcessor
         {
             return task.Operation switch
             {
-                // Лёгкие операции — локально через PdfSharp
-                PdfOperation.Merge => await MergePdfAsync(task, progress, cancellationToken),
-                PdfOperation.Split => await SplitPdfAsync(task, progress, cancellationToken),
-                PdfOperation.Rotate => await RotatePdfAsync(task, progress, cancellationToken),
-                PdfOperation.ExtractPages => await ExtractPagesAsync(task, progress, cancellationToken),
+                // Лёгкие операции — делегируем локальному PdfProcessor (PdfSharp).
+                // Это единственный источник правды для Merge/Split/Rotate/ExtractPages,
+                // избегаем дублирования бизнес-логики.
+                PdfOperation.Merge or
+                PdfOperation.Split or
+                PdfOperation.Rotate or
+                PdfOperation.ExtractPages => await _localProcessor.ProcessAsync(task, progress, cancellationToken),
 
                 // Тяжёлые операции — делегируем Gotenberg
                 PdfOperation.HtmlToPdf => await HtmlToPdfViaGotenbergAsync(task, progress, cancellationToken),
@@ -283,161 +282,5 @@ public class GotenbergPdfProcessor : IPdfProcessor
 
     #endregion
 
-    #region Local PdfSharp operations
-
-    private async Task<string> MergePdfAsync(
-        PdfTask task, IProgress<int>? progress, CancellationToken cancellationToken)
-    {
-        if (task.InputFilePaths.Count < 2)
-            throw new PdfProcessingException("Merge requires at least 2 input files", PdfOperation.Merge);
-
-        using var outputDocument = new PdfDocument();
-        var totalFiles = task.InputFilePaths.Count;
-
-        for (int i = 0; i < totalFiles; i++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            await using var inputStream = await _storage.OpenReadAsync(task.InputFilePaths[i]);
-            using var inputDocument = PdfReader.Open(inputStream, PdfDocumentOpenMode.Import);
-
-            for (int p = 0; p < inputDocument.PageCount; p++)
-                outputDocument.AddPage(inputDocument.Pages[p]);
-
-            progress?.Report((i + 1) * 100 / totalFiles);
-        }
-
-        return await SaveDocumentAsync(outputDocument, "merged.pdf");
-    }
-
-    private async Task<string> SplitPdfAsync(
-        PdfTask task, IProgress<int>? progress, CancellationToken cancellationToken)
-    {
-        var inputPath = task.InputFilePaths.FirstOrDefault()
-            ?? throw new PdfProcessingException("No input file provided", PdfOperation.Split);
-
-        await using var inputStream = await _storage.OpenReadAsync(inputPath);
-        using var inputDocument = PdfReader.Open(inputStream, PdfDocumentOpenMode.Import);
-
-        var pageCount = inputDocument.PageCount;
-        var outputPaths = new List<string>();
-
-        for (int i = 0; i < pageCount; i++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            using var singlePageDoc = new PdfDocument();
-            singlePageDoc.AddPage(inputDocument.Pages[i]);
-
-            var pagePath = await SaveDocumentAsync(singlePageDoc, $"page_{i + 1}.pdf");
-            outputPaths.Add(pagePath);
-
-            progress?.Report((i + 1) * 100 / pageCount);
-        }
-
-        return outputPaths.First();
-    }
-
-    private async Task<string> RotatePdfAsync(
-        PdfTask task, IProgress<int>? progress, CancellationToken cancellationToken)
-    {
-        var inputPath = task.InputFilePaths.FirstOrDefault()
-            ?? throw new PdfProcessingException("No input file provided", PdfOperation.Rotate);
-
-        var angle = 90;
-        if (task.Options?.TryGetValue("angle", out var angleObj) == true)
-            angle = Convert.ToInt32(angleObj);
-
-        if (angle % 90 != 0)
-            throw new PdfProcessingException(
-                $"Rotation angle must be a multiple of 90, got {angle}", PdfOperation.Rotate);
-
-        await using var inputStream = await _storage.OpenReadAsync(inputPath);
-        using var document = PdfReader.Open(inputStream, PdfDocumentOpenMode.Modify);
-
-        for (int i = 0; i < document.PageCount; i++)
-        {
-            document.Pages[i].Rotate = (document.Pages[i].Rotate + angle) % 360;
-            progress?.Report((i + 1) * 100 / document.PageCount);
-        }
-
-        return await SaveDocumentAsync(document, "rotated.pdf");
-    }
-
-    private async Task<string> ExtractPagesAsync(
-        PdfTask task, IProgress<int>? progress, CancellationToken cancellationToken)
-    {
-        var inputPath = task.InputFilePaths.FirstOrDefault()
-            ?? throw new PdfProcessingException("No input file provided", PdfOperation.ExtractPages);
-
-        var pagesString = task.Options?.GetValueOrDefault("pages")?.ToString() ?? "1";
-        var pageNumbers = ParsePageNumbers(pagesString);
-
-        await using var inputStream = await _storage.OpenReadAsync(inputPath);
-        using var inputDocument = PdfReader.Open(inputStream, PdfDocumentOpenMode.Import);
-        using var outputDocument = new PdfDocument();
-
-        var processed = 0;
-        foreach (var pageNumber in pageNumbers)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            if (pageNumber < 1 || pageNumber > inputDocument.PageCount)
-                continue;
-
-            outputDocument.AddPage(inputDocument.Pages[pageNumber - 1]);
-            processed++;
-            progress?.Report(processed * 100 / pageNumbers.Count);
-        }
-
-        if (outputDocument.PageCount == 0)
-            throw new PdfProcessingException("No valid pages to extract", PdfOperation.ExtractPages);
-
-        return await SaveDocumentAsync(outputDocument, "extracted.pdf");
-    }
-
-    #endregion
-
-    #region Helpers
-
-    private async Task<string> SaveDocumentAsync(PdfDocument document, string suggestedName)
-    {
-        var outputPath = $"{Guid.NewGuid():N}_{suggestedName}";
-
-        using var memoryStream = MemoryStreamManager.GetStream();
-        document.Save(memoryStream);
-        memoryStream.Position = 0;
-
-        return await _storage.SaveAsync(memoryStream, outputPath);
-    }
-
-    private static List<int> ParsePageNumbers(string pagesString)
-    {
-        var result = new List<int>();
-
-        foreach (var part in pagesString.Split(',', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var trimmed = part.Trim();
-
-            if (trimmed.Contains('-'))
-            {
-                var rangeParts = trimmed.Split('-');
-                if (rangeParts.Length == 2
-                    && int.TryParse(rangeParts[0], out var start)
-                    && int.TryParse(rangeParts[1], out var end))
-                {
-                    for (int i = start; i <= end; i++)
-                        result.Add(i);
-                }
-            }
-            else if (int.TryParse(trimmed, out var pageNumber))
-            {
-                result.Add(pageNumber);
-            }
-        }
-
-        return result.Distinct().OrderBy(x => x).ToList();
-    }
-
-    #endregion
 }
+
