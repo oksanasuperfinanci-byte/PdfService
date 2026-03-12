@@ -136,7 +136,7 @@ public class LocalFileStorage : IFileStorage
     }
 
     #endregion
-    private object SanitizeFileName(string fileName)
+    private string SanitizeFileName(string fileName)
     {
         // Удаляем все символы, которые могут быть опасны в пути
         var invalidChars = Path.GetInvalidFileNameChars();
